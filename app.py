@@ -204,15 +204,44 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
     fig.update_layout(height=600, yaxis_title="Price (USD)", xaxis_title="Date", showlegend=True)
     st.plotly_chart(fig, use_container_width=True)
     
+    # === EXCEL EXPORT FEATURE ===
     st.markdown("---")
-    st.subheader("📥 Export Financial Forecast")
+    st.subheader("📥 Export Advanced Financial Forecast")
     
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Sheet 1: The entire timeline (Train + Test Actuals aligned with Predictions)
         export_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
-        export_df.rename(columns={'ds': 'Date', 'yhat': 'Predicted_Price', 'yhat_lower': 'Lower_Bound', 'yhat_upper': 'Upper_Bound'}, inplace=True)
+        
+        # Bring Train and Test targets together
+        full_actuals = pd.concat([train[['ds', 'y']], test[['ds', 'y']]])
+        export_df = pd.merge(export_df, full_actuals, on='ds', how='left')
+        
+        export_df.rename(columns={
+            'ds': 'Date', 
+            'y': 'Actual_Market_Price',
+            'yhat': 'Predicted_Price', 
+            'yhat_lower': 'Lower_Bound', 
+            'yhat_upper': 'Upper_Bound'
+        }, inplace=True)
         export_df['Date'] = export_df['Date'].dt.date
-        export_df.to_excel(writer, index=False, sheet_name='Prophet_Forecast')
+        
+        # Rearrange columns organically
+        export_df = export_df[['Date', 'Actual_Market_Price', 'Predicted_Price', 'Lower_Bound', 'Upper_Bound']]
+        export_df.to_excel(writer, index=False, sheet_name='Full_Forecast_Data')
+        
+        # Sheet 2: The exact RMSE calculation table
+        rmse_sheet = calc_df.copy()
+        rmse_sheet['Date'] = rmse_sheet['Date'].dt.date.astype(str)
+        # Append the final RMSE output to the bottom of the table
+        rmse_sheet = pd.concat([rmse_sheet, pd.DataFrame([{
+            'Date': 'FINAL RESULT',
+            'Actual_Price ($)': np.nan,
+            'Predicted_Price ($)': 'FINAL ACTUAL RMSE:',
+            'Raw_Error ($)': np.nan,
+            'Squared_Error ($^2)': rmse
+        }])], ignore_index=True)
+        rmse_sheet.to_excel(writer, index=False, sheet_name='RMSE_Breakdown_Log')
     
     processed_data = output.getvalue()
     
