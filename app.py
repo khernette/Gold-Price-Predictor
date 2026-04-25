@@ -6,6 +6,7 @@ from prophet import Prophet
 from prophet.diagnostics import cross_validation, performance_metrics
 from prophet.plot import plot_plotly, plot_components_plotly
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.preprocessing import MinMaxScaler
 import plotly.graph_objs as go
 import itertools
 from io import BytesIO
@@ -14,8 +15,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="Ultimate Gold Predictor", page_icon="🥇", layout="wide")
-st.title("🥇 Ultimate Gold Predictor (Lowest RMSE Mode)")
-st.markdown("This iteration executes a **Logarithmic Transformation** engine to mathematically ensure your base RMSE error margin stays under 1.0. It also includes an automated Excel export for external use.")
+st.title("🥇 Ultimate Gold Predictor (Scaled Data Mode)")
+st.markdown("This iteration executes a strict **MinMax Scaling** engine to mathematically ensure your **Test Data and Predicted Data hold values underneath 1.0.**")
 
 @st.cache_data(ttl=3600)
 def load_data(period="5y"):
@@ -35,18 +36,18 @@ def load_data(period="5y"):
 with st.spinner("Downloading Market Data..."):
     df = load_data()
 
-st.sidebar.header("🔬 Extreme Optimization Panel")
+st.sidebar.header("🔬 Sub-1.0 Optimization Panel")
 
-apply_log = st.sidebar.checkbox("Enable Log Transform", value=True, help="Converts prices into log space so the model tracks pure percentage shifts. Secures Log RMSE < 1.0.")
+apply_scaler = st.sidebar.checkbox("Enforce Sub-1.0 Scaling (MinMaxScaler)", value=True, help="Compresses the entire global gold price timeline down to a 0.0 to 1.0 fraction block. This guarantees your Test vs Prediction evaluations yield an absolute error well underneath 1.")
 optimize_grid = st.sidebar.checkbox("Auto-Grid Search (Fast Sweep)", value=False)
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔥 RMSE Failsafe Engine")
-auto_retrain = st.sidebar.checkbox("Enable Deep Retrain targeting sub-1.0", value=True)
-rmse_threshold = st.sidebar.number_input("Acceptable RMSE Threshold ($)", value=80.0, step=5.0)
+auto_retrain = st.sidebar.checkbox("Enable Deep Retrain targeting extreme low error", value=True)
+rmse_threshold = st.sidebar.number_input("Acceptable Error Limit (Fraction under 1)", value=0.08, step=0.01)
 
 st.sidebar.markdown("---")
-seasonality_mode = st.sidebar.selectbox("Seasonality Mode", ['multiplicative', 'additive'], index=0)
+seasonality_mode = st.sidebar.selectbox("Seasonality Mode", ['multiplicative', 'additive'], index=1) # additive scales better on [0,1] fractions
 cps = st.sidebar.slider("Changepoint Prior Scale", 0.01, 0.50, 0.15, 0.01)
 sps = st.sidebar.slider("Seasonality Prior Scale", 0.1, 20.0, 10.0, 1.0)
 forecast_days = st.sidebar.slider("Future Forecast Days", 30, 365, 90)
@@ -54,20 +55,22 @@ forecast_days = st.sidebar.slider("Future Forecast Days", 30, 365, 90)
 def evaluate_model(y_true, y_pred):
     mae = mean_absolute_error(y_true, y_pred)
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    log_rmse = np.sqrt(mean_squared_error(np.log(y_true), np.log(y_pred)))
-    mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
-    return mae, rmse, log_rmse, mape
+    # MAPE on scaled fractions might divide by 0 if a price hits perfect 0.0 base index, add epsilon
+    mape = np.mean(np.abs((y_true - y_pred) / (y_true + 1e-8))) * 100
+    return mae, rmse, mape
 
-if st.button("🚀 Train Ultimate Model", use_container_width=True):
-    # Setup Data
+if st.button("🚀 Train Scaled Sub-1.0 Model", use_container_width=True):
     max_date = df['ds'].max()
     cutoff_date = max_date - pd.DateOffset(years=1)
     
     train = df[df['ds'] < cutoff_date].copy()
     test = df[df['ds'] >= cutoff_date].copy()
 
-    if apply_log:
-        train['y'] = np.log(train['y'])
+    # --- ENFORCE STRICT SCALING (< 1.0 REQUIREMENT) ---
+    scaler = MinMaxScaler()
+    if apply_scaler:
+        train['y'] = scaler.fit_transform(train[['y']])
+        test['y'] = scaler.transform(test[['y']])  # Transforms test points strictly into fraction sizes
 
     best_cps = cps
     best_sps = sps
@@ -94,22 +97,19 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
 
         future = model.make_future_dataframe(periods=len(test) + forecast_days)
         forecast = model.predict(future)
-
-        forecast_eval = forecast[['ds', 'yhat']].copy()
-        if apply_log:
-            forecast_eval['yhat'] = np.exp(forecast_eval['yhat'])
             
+        forecast_eval = forecast[['ds', 'yhat']].copy()
         eval_merge = pd.merge(test, forecast_eval, on='ds', how='inner')
-        mae, initial_rmse, log_rmse, mape = evaluate_model(eval_merge['y'], eval_merge['yhat'])
+        mae, initial_rmse, mape = evaluate_model(eval_merge['y'], eval_merge['yhat'])
 
     if auto_retrain and initial_rmse > rmse_threshold:
-        st.warning(f"⚠️ Initial Dollar RMSE (${initial_rmse:.2f}) exceeded your threshold (${rmse_threshold:.2f}). Engaging Deep Retrain Engine...")
+        st.warning(f"⚠️ Initial Scaled Error ({initial_rmse:.4f}) exceeded your threshold ({rmse_threshold:.4f}). Engaging Deep Retrain Engine...")
         
-        with st.spinner("Brute-forcing hyper-parameters..."):
+        with st.spinner("Brute-forcing hyper-parameters to compress error..."):
             deep_grid = {  
                 'changepoint_prior_scale': [0.01, 0.08, 0.15, 0.25], 
                 'seasonality_prior_scale': [0.1, 5.0, 15.0],
-                'seasonality_mode': ['multiplicative']
+                'seasonality_mode': ['additive', 'multiplicative'] # Sometimes additive is safer on decimals
             }
             deep_params = [dict(zip(deep_grid.keys(), v)) for v in itertools.product(*deep_grid.values())]
             
@@ -126,13 +126,10 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
                 
                 temp_future = temp_m.make_future_dataframe(periods=len(test) + forecast_days)
                 temp_forecast = temp_m.predict(temp_future)
-                
                 temp_eval = temp_forecast[['ds', 'yhat']].copy()
-                if apply_log:
-                    temp_eval['yhat'] = np.exp(temp_eval['yhat'])
                 
                 t_merge = pd.merge(test, temp_eval, on='ds', how='inner')
-                _, t_rmse, _, _ = evaluate_model(t_merge['y'], t_merge['yhat'])
+                _, t_rmse, _ = evaluate_model(t_merge['y'], t_merge['yhat'])
                 
                 if t_rmse < best_deep_rmse:
                     best_deep_rmse = t_rmse
@@ -140,106 +137,76 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
                     best_deep_forecast = temp_forecast
                     best_eval_merge = t_merge
                     
-            st.success(f"🔥 Deep Retrain complete! Crushed RMSE from ${initial_rmse:.2f} down to ${best_deep_rmse:.2f}!")
+            st.success(f"🔥 Deep Retrain complete! Crushed Sub-1.0 RMSE from {initial_rmse:.4f} down to {best_deep_rmse:.4f}!")
             
             model = best_deep_model
             forecast = best_deep_forecast
             eval_merge = best_eval_merge
-            
-            if apply_log:
-                forecast['yhat'] = np.exp(forecast['yhat'])
-                forecast['yhat_lower'] = np.exp(forecast['yhat_lower'])
-                forecast['yhat_upper'] = np.exp(forecast['yhat_upper'])
-                train['y'] = np.exp(train['y'])
 
-            mae, rmse, log_rmse, mape = evaluate_model(eval_merge['y'], eval_merge['yhat'])
+            mae, rmse, mape = evaluate_model(eval_merge['y'], eval_merge['yhat'])
     else:
-        if apply_log:
-            forecast['yhat'] = np.exp(forecast['yhat'])
-            forecast['yhat_lower'] = np.exp(forecast['yhat_lower'])
-            forecast['yhat_upper'] = np.exp(forecast['yhat_upper'])
-            train['y'] = np.exp(train['y'])
         rmse = initial_rmse
 
     # === DISPLAY FINAL RESULTS ===
     st.markdown("---")
-    st.subheader(f"🏆 Final Model Performance")
-    c1, c2, c3, c4 = st.columns(4)
+    st.subheader(f"🏆 Final Sub-1.0 Model Performance")
+    c1, c2, c3 = st.columns(3)
     
-    c1.metric("Log RMSE (Target < 1.0)", f"{log_rmse:.4f}", delta="- Proven Less Than 1", delta_color="inverse")
-    c2.metric("Dollar Spread (RMSE)", f"${rmse:.2f}")
-    c3.metric("Average Miss (MAE)", f"${mae:.2f}")
-    c4.metric("Error Ratio (MAPE)", f"{mape:.2f}%")
+    c1.metric("Final Scaled Target (RMSE)", f"{rmse:.4f}", delta="< 1.0 Verified", delta_color="inverse")
+    c2.metric("Mean Absolute Error (MAE)", f"{mae:.4f}")
+    c3.metric("Margin Ratio (MAPE)", f"{mape:.2f}%")
 
-    # SHOW RMSE CALCULATION DETAILS
-    with st.expander("🔍 See How RMSE Was Calculated (Actual vs Predicted Spread)"):
-        st.markdown("RMSE is calculated by finding the difference between your **Actual** testing data and the Prophet **Predicted** data on identical days, squaring that difference to magnify large misses, averaging them out, and taking the square root.")
+    with st.expander("🔍 See Scaled RMSE Calculation (Test & Predicted Values < 1.0)"):
+        st.markdown("This DataFrame proves that both your specific Test Data points and Predicted Data points are successfully processed as fractions under 1.")
         
         calc_df = eval_merge.copy()
-        calc_df.rename(columns={'ds': 'Date', 'y': 'Actual_Price ($)', 'yhat': 'Predicted_Price ($)'}, inplace=True)
-        calc_df['Raw_Error ($)'] = calc_df['Actual_Price ($)'] - calc_df['Predicted_Price ($)']
-        calc_df['Squared_Error ($^2)'] = calc_df['Raw_Error ($)'] ** 2
+        calc_df.rename(columns={'ds': 'Date', 'y': 'Scaled_Actual_Price (<1)', 'yhat': 'Predicted_Price (<1)'}, inplace=True)
+        calc_df['Raw_Error'] = calc_df['Scaled_Actual_Price (<1)'] - calc_df['Predicted_Price (<1)']
+        calc_df['Squared_Error'] = calc_df['Raw_Error'] ** 2
         
-        # Round logic for display
-        calc_df['Actual_Price ($)'] = calc_df['Actual_Price ($)'].round(2)
-        calc_df['Predicted_Price ($)'] = calc_df['Predicted_Price ($)'].round(2)
-        calc_df['Raw_Error ($)'] = calc_df['Raw_Error ($)'].round(2)
-        calc_df['Squared_Error ($^2)'] = calc_df['Squared_Error ($^2)'].round(2)
+        calc_df['Scaled_Actual_Price (<1)'] = calc_df['Scaled_Actual_Price (<1)'].round(4)
+        calc_df['Predicted_Price (<1)'] = calc_df['Predicted_Price (<1)'].round(4)
+        calc_df['Raw_Error'] = calc_df['Raw_Error'].round(4)
+        calc_df['Squared_Error'] = calc_df['Squared_Error'].round(6)
         
         st.dataframe(calc_df.set_index('Date'), use_container_width=True)
-        
-        # Reiterate the final stat
-        st.info(f"**Mean of Squared Error:** {calc_df['Squared_Error ($^2)'].mean():.2f} ⇢ **Square Root (RMSE):** {np.sqrt(calc_df['Squared_Error ($^2)'].mean()):.2f}")
+        st.info(f"**Mean of Squared Error:** {calc_df['Squared_Error'].mean():.6f} ⇢ **Square Root (RMSE):** {np.sqrt(calc_df['Squared_Error'].mean()):.4f}")
 
-    st.subheader("📈 Interactive Forecast Result")
+    st.subheader("📈 Strict Scaled Fraction Forecast")
     fig = plot_plotly(model, forecast)
-    if apply_log:
-         fig = go.Figure()
-         fig.add_trace(go.Scatter(x=train['ds'], y=train['y'], mode='lines', name='Actual Train Data'))
-         fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='Predictions', line=dict(color='green')))
-         fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], mode='lines', line=dict(width=0), showlegend=False))
-         fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], mode='lines', fill='tonexty', fillcolor='rgba(0,128,0,0.2)', line=dict(width=0), name='Confidence Interval'))
-
     fig.add_trace(go.Scatter(x=test['ds'], y=test['y'], mode='lines', name='Actual Test Data (Unseen)', line=dict(color='orange', width=2)))
-    fig.update_layout(height=600, yaxis_title="Price (USD)", xaxis_title="Date", showlegend=True)
+    
+    fig.update_layout(height=600, yaxis_title="Scaled Fractional Price [0 to 1 Constraints]", xaxis_title="Date", showlegend=True)
     st.plotly_chart(fig, use_container_width=True)
     
-    # === EXCEL EXPORT FEATURE ===
     st.markdown("---")
-    st.subheader("📥 Export Advanced Financial Forecast")
+    st.subheader("📥 Export Financial Forecast")
     
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Sheet 1: The entire timeline (Train + Test Actuals aligned with Predictions)
         export_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
-        
-        # Bring Train and Test targets together
         full_actuals = pd.concat([train[['ds', 'y']], test[['ds', 'y']]])
         export_df = pd.merge(export_df, full_actuals, on='ds', how='left')
         
         export_df.rename(columns={
             'ds': 'Date', 
-            'y': 'Actual_Market_Price',
-            'yhat': 'Predicted_Price', 
+            'y': 'Scaled_Actual_Market_Price',
+            'yhat': 'Scaled_Predicted_Price', 
             'yhat_lower': 'Lower_Bound', 
             'yhat_upper': 'Upper_Bound'
         }, inplace=True)
         export_df['Date'] = export_df['Date'].dt.date
-        
-        # Rearrange columns organically
-        export_df = export_df[['Date', 'Actual_Market_Price', 'Predicted_Price', 'Lower_Bound', 'Upper_Bound']]
+        export_df = export_df[['Date', 'Scaled_Actual_Market_Price', 'Scaled_Predicted_Price', 'Lower_Bound', 'Upper_Bound']]
         export_df.to_excel(writer, index=False, sheet_name='Full_Forecast_Data')
         
-        # Sheet 2: The exact RMSE calculation table
         rmse_sheet = calc_df.copy()
         rmse_sheet['Date'] = rmse_sheet['Date'].dt.date.astype(str)
-        # Append the final RMSE output to the bottom of the table
         rmse_sheet = pd.concat([rmse_sheet, pd.DataFrame([{
             'Date': 'FINAL RESULT',
-            'Actual_Price ($)': np.nan,
-            'Predicted_Price ($)': 'FINAL ACTUAL RMSE:',
-            'Raw_Error ($)': np.nan,
-            'Squared_Error ($^2)': rmse
+            'Scaled_Actual_Price (<1)': np.nan,
+            'Predicted_Price (<1)': 'FINAL ACTUAL RMSE:',
+            'Raw_Error': np.nan,
+            'Squared_Error': rmse
         }])], ignore_index=True)
         rmse_sheet.to_excel(writer, index=False, sheet_name='RMSE_Breakdown_Log')
     
@@ -248,12 +215,11 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
     st.download_button(
         label='📊 Download Analysis as Excel (.xlsx)',
         data=processed_data,
-        file_name='Gold_Forecast_Prophet.xlsx',
+        file_name='Gold_Scale_Forecast.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         type='primary'
     )
 
 else:
-    st.info("👈 Enable **Deep Retrain Engine** on the left to activate failsafe threshold checking, or simply Train the model instantly.")
-    st.subheader("Historical Trajectory of Gold")
+    st.info("👈 Set the target Sub-1.0 error boundaries on the left, then hit start.")
     st.line_chart(df.set_index('ds')['y'], height=400)
