@@ -86,7 +86,6 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
             best_params = all_params[np.argmin(rmses)]
             best_cps, best_sps = best_params['changepoint_prior_scale'], best_params['seasonality_prior_scale']
 
-        # INITIAL MODEL RUN
         model = Prophet(daily_seasonality=False, weekly_seasonality=False, yearly_seasonality=True, seasonality_mode=seasonality_mode, changepoint_prior_scale=best_cps, seasonality_prior_scale=best_sps)
         model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
         model.add_seasonality(name='quarterly', period=91.25, fourier_order=7)
@@ -96,11 +95,6 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
         future = model.make_future_dataframe(periods=len(test) + forecast_days)
         forecast = model.predict(future)
 
-        if apply_log:
-            temp_yhat = np.exp(forecast['yhat'])
-        else:
-            temp_yhat = forecast['yhat']
-            
         forecast_eval = forecast[['ds', 'yhat']].copy()
         if apply_log:
             forecast_eval['yhat'] = np.exp(forecast_eval['yhat'])
@@ -108,13 +102,12 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
         eval_merge = pd.merge(test, forecast_eval, on='ds', how='inner')
         mae, initial_rmse, log_rmse, mape = evaluate_model(eval_merge['y'], eval_merge['yhat'])
 
-    # === DEEP RETRAIN CHECK ===
     if auto_retrain and initial_rmse > rmse_threshold:
         st.warning(f"⚠️ Initial Dollar RMSE (${initial_rmse:.2f}) exceeded your threshold (${rmse_threshold:.2f}). Engaging Deep Retrain Engine...")
         
         with st.spinner("Brute-forcing hyper-parameters..."):
             deep_grid = {  
-                'changepoint_prior_scale': [0.01, 0.08, 0.15, 0.25, 0.45], 
+                'changepoint_prior_scale': [0.01, 0.08, 0.15, 0.25], 
                 'seasonality_prior_scale': [0.1, 5.0, 15.0],
                 'seasonality_mode': ['multiplicative']
             }
@@ -123,6 +116,7 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
             best_deep_rmse = float('inf')
             best_deep_model = None
             best_deep_forecast = None
+            best_eval_merge = None
             
             for params in deep_params:
                 temp_m = Prophet(daily_seasonality=False, weekly_seasonality=False, yearly_seasonality=True, **params)
@@ -144,11 +138,13 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
                     best_deep_rmse = t_rmse
                     best_deep_model = temp_m
                     best_deep_forecast = temp_forecast
+                    best_eval_merge = t_merge
                     
             st.success(f"🔥 Deep Retrain complete! Crushed RMSE from ${initial_rmse:.2f} down to ${best_deep_rmse:.2f}!")
             
             model = best_deep_model
             forecast = best_deep_forecast
+            eval_merge = best_eval_merge
             
             if apply_log:
                 forecast['yhat'] = np.exp(forecast['yhat'])
@@ -156,7 +152,6 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
                 forecast['yhat_upper'] = np.exp(forecast['yhat_upper'])
                 train['y'] = np.exp(train['y'])
 
-            eval_merge = pd.merge(test, forecast[['ds', 'yhat']], on='ds', how='inner')
             mae, rmse, log_rmse, mape = evaluate_model(eval_merge['y'], eval_merge['yhat'])
     else:
         if apply_log:
@@ -171,11 +166,30 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
     st.subheader(f"🏆 Final Model Performance")
     c1, c2, c3, c4 = st.columns(4)
     
-    # We display Statistical Log RMSE primarily to prove it is < 1 to the User, because raw Dollar RMSE for an asset costing > $2000 fundamentally cannot be under 1 mathematically unless the model perfectly memorized the future.
     c1.metric("Log RMSE (Target < 1.0)", f"{log_rmse:.4f}", delta="- Proven Less Than 1", delta_color="inverse")
     c2.metric("Dollar Spread (RMSE)", f"${rmse:.2f}")
     c3.metric("Average Miss (MAE)", f"${mae:.2f}")
     c4.metric("Error Ratio (MAPE)", f"{mape:.2f}%")
+
+    # SHOW RMSE CALCULATION DETAILS
+    with st.expander("🔍 See How RMSE Was Calculated (Actual vs Predicted Spread)"):
+        st.markdown("RMSE is calculated by finding the difference between your **Actual** testing data and the Prophet **Predicted** data on identical days, squaring that difference to magnify large misses, averaging them out, and taking the square root.")
+        
+        calc_df = eval_merge.copy()
+        calc_df.rename(columns={'ds': 'Date', 'y': 'Actual_Price ($)', 'yhat': 'Predicted_Price ($)'}, inplace=True)
+        calc_df['Raw_Error ($)'] = calc_df['Actual_Price ($)'] - calc_df['Predicted_Price ($)']
+        calc_df['Squared_Error ($^2)'] = calc_df['Raw_Error ($)'] ** 2
+        
+        # Round logic for display
+        calc_df['Actual_Price ($)'] = calc_df['Actual_Price ($)'].round(2)
+        calc_df['Predicted_Price ($)'] = calc_df['Predicted_Price ($)'].round(2)
+        calc_df['Raw_Error ($)'] = calc_df['Raw_Error ($)'].round(2)
+        calc_df['Squared_Error ($^2)'] = calc_df['Squared_Error ($^2)'].round(2)
+        
+        st.dataframe(calc_df.set_index('Date'), use_container_width=True)
+        
+        # Reiterate the final stat
+        st.info(f"**Mean of Squared Error:** {calc_df['Squared_Error ($^2)'].mean():.2f} ⇢ **Square Root (RMSE):** {np.sqrt(calc_df['Squared_Error ($^2)'].mean()):.2f}")
 
     st.subheader("📈 Interactive Forecast Result")
     fig = plot_plotly(model, forecast)
@@ -190,16 +204,13 @@ if st.button("🚀 Train Ultimate Model", use_container_width=True):
     fig.update_layout(height=600, yaxis_title="Price (USD)", xaxis_title="Date", showlegend=True)
     st.plotly_chart(fig, use_container_width=True)
     
-    # === EXCEL EXPORT FEATURE ===
     st.markdown("---")
     st.subheader("📥 Export Financial Forecast")
-    st.markdown("Click below to download the compiled historical trajectory mixed with future Prophet predictive analysis directly into an Excel spreadsheet.")
     
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         export_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
         export_df.rename(columns={'ds': 'Date', 'yhat': 'Predicted_Price', 'yhat_lower': 'Lower_Bound', 'yhat_upper': 'Upper_Bound'}, inplace=True)
-        # Format the dates natively without time bloat
         export_df['Date'] = export_df['Date'].dt.date
         export_df.to_excel(writer, index=False, sheet_name='Prophet_Forecast')
     
